@@ -1,51 +1,62 @@
 import math
+import random
 import pandas as pd
 import networkx as nx
 import igraph as ig
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
+# import torch.optim as optim
+import torch_optimizer as optim
 import plotly.graph_objects as go
 import stellargraph as sg
 from sklearn.metrics.pairwise import cosine_similarity
 from node2vec import Node2Vec
-from torch_geometric.data import Data
 from stellargraph.data import BiasedRandomWalk
-from vose_sampler import VoseAlias
+from sklearn.decomposition import PCA
+
+EMBEDDING_DIMENSION = 256
+NUM_EPOCHS = 50
+BATCH_SIZE = 8
+LR = 0.0001
+
 
 #read cora.cites file
 file_path = "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\cora.cites"
-metaDataPath="C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\cora.content"
+metaDataPath= "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\cora.content"
 data = pd.read_csv(file_path, sep='\t', names=['cited_paper_id', 'citing_paper_id'])
 
 # Create a directed graph from the dataframe
 G = nx.from_pandas_edgelist(data, source='citing_paper_id', target='cited_paper_id', create_using=nx.DiGraph())
 
-# Class Declerations:
 class Generator(nn.Module):
-    def __init__(self, latent_dim, output_dim):
+    def __init__(self, latent_dim):
         super(Generator, self).__init__()
-        # Define your network layers here
-        self.fc = nn.Linear(latent_dim, output_dim)
+        self.model = nn.Sequential(
+            nn.Linear(latent_dim, EMBEDDING_DIMENSION), # Adjust to your architecture needs
+            nn.ReLU(),
+            nn.Linear(EMBEDDING_DIMENSION, EMBEDDING_DIMENSION),       # This should match the concatenated vector size
+            # Add more layers if necessary
+        )
 
     def forward(self, z):
-        # Define the forward pass
-        return self.fc(z)
+        return self.model(z)
+
 class Discriminator(nn.Module):
-    def __init__(self, feature_dim):
+    def __init__(self):
         super(Discriminator, self).__init__()
         self.model = nn.Sequential(
-            nn.Linear(feature_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1),
-            nn.Sigmoid()  # Output probability of being a real citation
+            nn.Linear(EMBEDDING_DIMENSION, EMBEDDING_DIMENSION // 2),       # Input layer now takes 256-dimensional vector
+            nn.LeakyReLU(),
+            nn.Linear(EMBEDDING_DIMENSION // 2, EMBEDDING_DIMENSION // 4),
+            nn.LeakyReLU(),
+            nn.Linear(EMBEDDING_DIMENSION // 4, 1),
+            nn.Sigmoid()
         )
 
     def forward(self, features):
         return self.model(features)
+
 class EarlyStopping:
     def __init__(self, patience=10, min_delta=0.01, save_embeddings=False):
         """
@@ -79,7 +90,7 @@ class EarlyStopping:
                 print('Early stopping triggered')
                 self.early_stop = True
 # End of Class
-             
+           
 def print_graph(g):
   # Get the positions of the nodes using a layout
   layout = g.layout("kk")
@@ -110,12 +121,12 @@ def print_graph(g):
                                   margin=dict(b=0,l=0,r=0,t=0)))
 
   fig.show()
-
+  
 def coarsen_weighted_graph(original_graph, communities, edge_weights):
     # Determine the unique communities and create a mapping for super-nodes
     unique_communities = set(communities.membership)
     community_to_super_node = {community: i for i, community in enumerate(unique_communities)}
-    final_weights = [];
+    final_weights = []
     # Create a new igraph graph for the coarsened version
     coarsened_graph = ig.Graph(directed=True)
     coarsened_graph.add_vertices(len(unique_communities))
@@ -222,6 +233,29 @@ def calculate_edge_weights(graph, features):
 
     return weights, cites
 
+def group_walks_by_length(walks):
+    # Initialize a dictionary to hold walks grouped by their length
+    grouped_walks = {}
+    
+    # Iterate over each walk in the input list
+    for walk in walks:
+        # Determine the length of the current walk
+        length = len(walk)
+        
+        # If this length hasn't been encountered yet, initialize a new list
+        if length not in grouped_walks:
+            grouped_walks[length] = []
+        
+        # Append the current walk to the appropriate list based on its length
+        grouped_walks[length].append(walk)
+    
+    # Now, grouped_walks contains walks grouped by length. Let's convert it to a list of lists.
+    # Note: This step is optional depending on whether you need the output as a dictionary or a list of lists.
+    # The following line extracts only the values (which are lists of walks) and converts them to a list
+    grouped_walks_list = list(grouped_walks.values())
+    
+    return grouped_walks_list
+
 def get_old_id_by_new_id(new_id_from,new_id_to, id_mapping):
     reverse_mapping = {v: k for k, v in id_mapping.items()}
     old_id_from = reverse_mapping.get(new_id_from)
@@ -244,8 +278,43 @@ def Node2VecAlg(graph):
 
   # If you want to use the embeddings directly, you can do so like this:
   embeddings = model.wv
+  # Extract embeddings into a dictionary
+  embeddings_dictionary = {node: model.wv[node] for node in model.wv.key_to_index.keys()}
 
-  return embeddings
+  return embeddings,embeddings_dictionary
+
+def pairs_to_tensor(pairs, node_embeddings):
+    tensors_list = []
+    for a, b in pairs:
+        # Convert each embedding from numpy.ndarray to a torch tensor
+        embedding_a = torch.tensor(node_embeddings[str(a)], dtype=torch.float32)
+        embedding_b = torch.tensor(node_embeddings[str(b)], dtype=torch.float32)
+        
+        # Concatenate the tensors
+        concatenated = torch.cat((embedding_a, embedding_b), dim=0)
+        tensors_list.append(concatenated)
+    
+    # Stack all tensors to create a single tensor
+    return torch.stack(tensors_list)
+
+def generate_real_neighbor_pairs(graph, embeddings_dict):
+    # List to store concatenated embeddings of real neighbor pairs
+    real_pairs_list = []
+
+    # Iterate over each edge in the graph
+    for edge in graph.edges():
+        node_a, node_b = edge
+        # Retrieve the embeddings for node_a and node_b
+        embedding_a = torch.tensor(embeddings_dict[str(node_a)], dtype=torch.float32)
+        embedding_b = torch.tensor(embeddings_dict[str(node_b)], dtype=torch.float32)
+        # Concatenate the embeddings
+        concatenated = torch.cat((embedding_a, embedding_b), dim=0)
+        # Add the concatenated embeddings to the list
+        real_pairs_list.append(concatenated)
+
+    # Convert the list of tensors to a single tensor
+    real_neighbor_pairs = torch.stack(real_pairs_list)
+    return real_neighbor_pairs
 
 def convert_igraph_to_networkx(igraph_graph):
     """
@@ -273,29 +342,14 @@ def convert_igraph_to_networkx(igraph_graph):
 
     return nx_graph
 
-def convert_networkx_to_pyg(graph):
-    # Convert NetworkX graph to edge list and node attributes (embeddings)
-    edge_index = torch.tensor(list(graph.edges()), dtype=torch.long).t().contiguous()
-    x = None
+def print_sample_mapping(node_to_community, sample_size=5):
+    print("Sample Node to Community Mapping:")
+    # If the graph is small or you want to print all mappings, you can adjust sample_size accordingly
+    sample_nodes = random.sample(list(node_to_community.keys()), min(sample_size, len(node_to_community)))
+    for node in sample_nodes:
+        print(f"Node {node} -> Community {node_to_community[node]}")
 
-    node_embeddings = nx.get_node_attributes(graph, 'embedding')
-    if node_embeddings:
-        # If embeddings are present, prepare the node feature matrix 'x'
-        embeddings = list(node_embeddings.values())  # Get the embeddings as a list
-        x = torch.tensor(embeddings, dtype=torch.float)
-
-
-    # If the graph has edge weights, prepare the edge attribute matrix 'edge_attr'
-    edge_attr = None
-    if nx.is_weighted(graph):
-        edge_weights = [graph[u][v]['weight'] for u, v in graph.edges()]
-        edge_attr = torch.tensor(edge_weights, dtype=torch.float).view(-1, 1)
-
-    # Create PyTorch Geometric Data object
-    data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
-    return data
-
-def LF_NetLay(graph):
+def LF_NetLay(graph, feature_vectors):
   # Apply the Infomap algorithm
   communities = graph.community_infomap(edge_weights='weight')
 
@@ -303,9 +357,17 @@ def LF_NetLay(graph):
   num_communities = len(set(communities.membership))
 
   print(f"Number of communities detected: {num_communities}")
+  # Coarsen the graph based on detected communities
+  g1 = coarsen_weighted_graph(graph, communities ,graph.es['weight'])
+  
+  #Create a mapping from nodes to their communities
+  node_to_community = {node: comm for node, comm in enumerate(communities.membership)}
 
-  g1 = coarsen_weighted_graph(graph,communities,graph.es['weight'])
-  return g1
+  #calculate feature vector for each cluster
+  clusters_feature_vectors = compute_cluster_averages_from_list(communities.membership, feature_vectors)
+
+  #print_sample_mapping(node_to_community)
+  return g1, node_to_community, clusters_feature_vectors
 
 def normalize_weights(weights, epsilon=1e-4):
     # Find minimum and maximum weights
@@ -326,144 +388,189 @@ def bounded_min_max_normalization(weights, lower_bound=0.1, upper_bound=1):
     scale = upper_bound - lower_bound
     return [lower_bound + (weight - min_weight) / (max_weight - min_weight) * scale for weight in weights]
 
-def print_pyg_graph_summary(data):
-    print("Graph Summary:")
-    # The number of nodes can be inferred from the size of the x tensor if it exists
-    num_nodes = data.num_nodes if data.num_nodes is not None else data.x.size(0) if data.x is not None else 0
-    print(f"- Number of nodes: {num_nodes}")
+def resize_feature_vectors(feature_vectors_dict, target_dim=EMBEDDING_DIMENSION // 2):
+    """
+    Resize all feature vectors using PCA and update the dictionary in place.
+    
+    Args:
+        feature_vectors_dict (dict): A dictionary mapping nodes to their feature vectors.
+        target_dim (int): The target dimensionality for the PCA output.
+    """
+    # Convert dictionary to a matrix (n_samples, n_features)
+    nodes, feature_matrix = zip(*feature_vectors_dict.items())
+    feature_matrix = np.array(feature_matrix)
+    
+    # Apply PCA
+    pca = PCA(n_components=target_dim)
+    resized_feature_matrix = pca.fit_transform(feature_matrix)
+    
+    # Update the dictionary with resized feature vectors
+    for node, resized_feature_vec in zip(nodes, resized_feature_matrix):
+        feature_vectors_dict[node] = resized_feature_vec
 
-    # The number of edges is half the size of the edge_index tensor (since it's [2, num_edges])
-    print(f"- Number of edges: {data.edge_index.size(1)}")
+def pre_train_G(graph, real_neighbor_pairs):
+    latent_dim = EMBEDDING_DIMENSION
+    generator = Generator(latent_dim)
+    # Initialize the RAdam optimizer for the generator
+    optimizer_G = optim.RAdam(generator.parameters(), lr=LR)
+    # Use MAE (L1 Loss) as the loss function
+    loss_function = nn.L1Loss()  
+    early_stopping = EarlyStopping(patience=int(graph.number_of_nodes() ** 0.5), min_delta=0.01, save_embeddings=True)
 
-    # Check if the graph has node features and print them
-    if data.x is not None:
-        print("- Node Embeddings:")
-        for idx, embedding in enumerate(data.x):
-            print(f"  Node {idx}: Embedding {embedding.tolist()}")
-    else:
-        print("- Node feature matrix: Not present")
+																									
+    for epoch in range(NUM_EPOCHS):  # Number of epochs
+        # Generate noise vectors
+        z = torch.randn(real_neighbor_pairs.size(0), latent_dim, device=real_neighbor_pairs.device)  # Ensure device compatibility
 
-    # Optionally, print a sample of edges
-    print("- Sample Edges (first 5):")
-    for i in range(min(data.edge_index.size(1), 5)):
-        edge = data.edge_index[:, i]
-        print(f"  Edge from Node {edge[0].item()} to Node {edge[1].item()}")
+        # Generate fake embeddings from noise
+        generated_embeddings = generator(z)
 
-def pre_train_G(pyg_graph):
+        # Calculate the MAE loss between generated embeddings and real neighbor pairs
+        loss_G = loss_function(generated_embeddings, real_neighbor_pairs)
 
-  # Instantiate the Generator
-  latent_dim = pyg_graph.x.shape[1]  # Size of the noise vector
-  pretrain_epochs = 100 # full passes through the dataset
-  output_dim = pyg_graph.x.shape[1]  # Size of Node2Vec embeddings'
-  generator = Generator(latent_dim, output_dim)
+        # Early stopping check
+        early_stopping(loss_G.item(), generated_embeddings)  # Pass loss.item() for early stopping
+        if early_stopping.early_stop:
+            print("Stopping training...")
+            break
 
-  # Define the optimizer
-  optimizer_G = torch.optim.Adam(generator.parameters(), lr=0.01)
+        # Backpropagation
+        optimizer_G.zero_grad()
+        loss_G.backward()
+        optimizer_G.step()
 
-  # Loss function could be Mean Squared Error or similar
-  loss_function = nn.MSELoss()
+        if epoch % 10 == 0:  # Log the progress every 10 epochs
+            print(f'Epoch {epoch}: Generator Pre-training Loss: {loss_G.item()}')
 
-  # Assuming pyg_graph is your PyTorch Geometric graph object
-  number_of_vertices = pyg_graph.num_nodes # This gets the number of nodes (vertices) in the graph
+    return early_stopping.best_embeddings if early_stopping.save_embeddings else None, generator, optimizer_G, loss_function
 
-  # Calculate the square of the number of vertices
-  square_of_vertices = int(number_of_vertices ** 0.5)
+def pre_train_D(real_neighbor_pairs, fake_embeddings):
+    discriminator = Discriminator() 
+    optimizer_D = optim.RAdam(discriminator.parameters(), lr=LR)
+    loss_function = nn.BCELoss()
+    early_stopping = EarlyStopping(patience=5, min_delta=0.01)  # Adjust patience as needed
 
+    # Create labels for real and fake data
+    real_labels = torch.ones(real_neighbor_pairs.size(0), 1)
+    fake_labels = torch.zeros(fake_embeddings.size(0), 1)
+    
+    # Combine real and fake embeddings and labels
+    combined_embeddings = torch.cat([real_neighbor_pairs, fake_embeddings], dim=0)
+    combined_labels = torch.cat([real_labels, fake_labels], dim=0)
 
+    # Pre-training loop
+    for epoch in range(NUM_EPOCHS):
+        # Forward pass to get discriminator outputs for combined embeddings
+        predictions = discriminator(combined_embeddings)
 
-  early_stopping = EarlyStopping(patience=square_of_vertices, min_delta=0.01, save_embeddings=True)
+        # Calculate loss
+        loss = loss_function(predictions, combined_labels)
 
-  # Pre-training the Generator
-  for epoch in range(pretrain_epochs):
-      # Generate random noise vectors
-      z = torch.randn(pyg_graph.x.size(0), latent_dim)
+        # Backward and optimize
+        optimizer_D.zero_grad()
+        loss.backward()
+        optimizer_D.step()
 
-      # Generate fake embeddings from noise
-      generated_embeddings = generator(z)
-      # Calculate the loss based on how close the generated embeddings are to the Node2Vec ones
-      loss_G = loss_function(generated_embeddings, pyg_graph.x)
+        # Early stopping check
+        early_stopping(loss)
+        if early_stopping.early_stop:
+            print("Stopping training...")
+            break
 
-      early_stopping(loss_G, generated_embeddings)
-      if early_stopping.early_stop:
-        print("Stopping training...")
-        break
+        # Print loss every 10 epochs
+        if epoch % 10 == 0:
+            print(f"Epoch [{epoch}/{NUM_EPOCHS}], Loss: {loss.item()}")
 
-      # Backpropagation
-      optimizer_G.zero_grad()
-      loss_G.backward()
-      optimizer_G.step()
-
-      # Log the progress
-      print(f'Epoch {epoch}: Generator Pre-training Loss: {loss_G.item()}')
-
-  return early_stopping.best_embeddings
-
-def pre_train_D(pyg_graph, fake_embeddings):
-
-  # Combine real and fake embeddings and labels
-  real_embeddings = pyg_graph.x
-  combined_embeddings = torch.cat([real_embeddings, fake_embeddings], dim=0)
-  real_labels = torch.ones(real_embeddings.size(0), 1)
-  fake_labels = torch.zeros(fake_embeddings.size(0), 1)
-  combined_labels = torch.cat([real_labels, fake_labels], dim=0)
-
-  feature_dim = pyg_graph.x.shape[1]
-  discriminator = Discriminator(feature_dim)
-  pretrain_epochs = 100 # full passes through the dataset
-  optimizer = optim.Adam(discriminator.parameters(), lr=0.001)
-  loss_function = nn.BCELoss()
-
-  # Assuming pyg_graph is your PyTorch Geometric graph object
-  number_of_vertices = pyg_graph.num_nodes # This gets the number of nodes (vertices) in the graph
-
-  # Calculate the square of the number of vertices
-  square_of_vertices = int(number_of_vertices ** 0.5)
-
-  early_stopping = EarlyStopping(patience=square_of_vertices, min_delta=0.01)
-
-  # Pre-training loop
-  for epoch in range(pretrain_epochs):
-      # Forward pass
-      predictions = discriminator(combined_embeddings)
-      #print(f"predictions type {type(predictions)}, value: {predictions}")
-      loss = loss_function(predictions, combined_labels)
-
-
-      # Backward and optimize
-      optimizer.zero_grad()
-      loss.backward(retain_graph=True)
-      optimizer.step()
-
-      if epoch % 10 == 0:
-          print(f"Epoch [{epoch}/{pretrain_epochs}], Loss: {loss.item()}")
-
-      early_stopping(loss)
-      if early_stopping.early_stop:
-          print("Stopping training...")
-          break
-
-def EmbedGAN(pyg_graph,networkX_graph):
+    return discriminator, optimizer_D, loss_function
+ 
+def EmbedGAN(networkX_graph, node_embeddings, generator, discriminator, optimizer_G, optimizer_D, loss_G, loss_D):
   
-  fake_embeddings = pre_train_G(pyg_graph)
+  #Random Walk
+  generated_walks = builder_sampling_strategy(networkX_graph)
 
-  # Assuming fake_embeddings is the output from the pre-trained generator
-  fake_embeddings_detached = fake_embeddings.detach()
-  pre_train_D(pyg_graph, fake_embeddings_detached)
+  #Train GAN
+  generator, discriminator = train_GAN(
+        walks = generated_walks,
+        node_embeddings = node_embeddings,
+        generator = generator,
+        discriminator = discriminator,
+        optimizer_G = optimizer_G,
+        optimizer_D = optimizer_D,
+        loss_G = loss_G,
+        loss_D = loss_D,
+        num_epochs = NUM_EPOCHS,
+        batch_size = BATCH_SIZE
+    )
 
-  #Random Walk && Alias Method
-  builder_sampling_strategy(networkX_graph)
+  return generator, discriminator
 
-def GAHNRL(g):
+def train_GAN(walks, node_embeddings, generator, discriminator, optimizer_G, optimizer_D, loss_G, loss_D, num_epochs, batch_size):
+    positive_pairs = []
+    # Extract positive samples
+    for walk in walks:
+        start_node, end_node = walk[0], walk[-1]
+        positive_pair = (start_node, end_node)
+        if start_node != end_node and positive_pair not in positive_pairs:# and graph.has_edge(start_node, end_node):
+            positive_pairs.append(positive_pair)
+
+    positive_tensor = pairs_to_tensor(positive_pairs, node_embeddings) # Positive examples tensor
+
+    for epoch in range(num_epochs):
+        # Shuffle positive pairs each epoch
+        random_positive_sample_index = torch.randperm(positive_tensor.size(0))
+        positive_tensor = positive_tensor[random_positive_sample_index]
+
+        total_batches = positive_tensor.size(0) // batch_size
+
+        for batch_num in range(total_batches):
+            start_index = batch_num * batch_size
+            end_index = start_index + batch_size
+
+            pos_batch = positive_tensor[start_index:end_index]
+
+            # Train discriminator on real data
+            optimizer_D.zero_grad()
+            real_loss = loss_D(discriminator(pos_batch), torch.ones(batch_size, 1))
+            
+            # Generate fake data
+            z = torch.randn(batch_size, EMBEDDING_DIMENSION)  # Adjust the dimension if necessary
+            neg_batch = generator(z)
+            
+            # Train discriminator on fake data
+            fake_loss = loss_D(discriminator(neg_batch), torch.zeros(batch_size, 1))
+            d_loss = real_loss + fake_loss
+            d_loss.backward()
+            optimizer_D.step()
+
+            # Train generator
+            optimizer_G.zero_grad()
+            z = torch.randn(batch_size, EMBEDDING_DIMENSION)  # Adjust the dimension if necessary
+            gen_data = generator(z)
+            g_loss = loss_G(discriminator(gen_data), torch.ones(batch_size, 1))
+            g_loss.backward()
+            optimizer_G.step()
+            if(epoch%10 == 0):
+                print(f'Epoch: {epoch+1}, Batch: {batch_num+1}/{total_batches}, D_loss: {d_loss.item()} real loss: {real_loss}, fake loss: {fake_loss}, G_loss: {g_loss.item()}')
+
+
+    return generator, discriminator
+
+def GAHNRL(g, feature_vectors):
   coarsed_graphs = [g]
+  graphs_node_to_community = [{}]
   networkx_graphs = []
+  feature_vectors_dict_list = [feature_vectors]
+
   while(len(g.get_edgelist()) > 1):
-    G = LF_NetLay(g)
-    if(len(G.get_edgelist()) < 2):
+    G,current_graph_node_mapping,current_graph_feature_vec = LF_NetLay(g, feature_vectors_dict_list[-1])
+    if(len(G.get_edgelist()) < 5):
       break
     else:
       coarsed_graphs.append(G)
+      graphs_node_to_community.append(current_graph_node_mapping)
+      feature_vectors_dict_list.append(current_graph_feature_vec)
       #print(f"Before normalization:{G.es['weight']}")
-      normalized_weights = bounded_min_max_normalization(G.es['weight']);
+      normalized_weights = bounded_min_max_normalization(G.es['weight'])
       G.es['weight'] = normalized_weights  # Update the graph with normalized weights
       #print(f"After normalization:{G.es['weight']}")
       g = G
@@ -476,7 +583,7 @@ def GAHNRL(g):
     networkx_graphs.append(networkXg)
 
   Gn=networkx_graphs[len(networkx_graphs)-1]
-  embeddings = Node2VecAlg(Gn)
+  embeddings,embedding_dictionary = Node2VecAlg(Gn)
 
   # Iterate over each node in the graph
   for node in Gn.nodes():
@@ -485,10 +592,37 @@ def GAHNRL(g):
       # Assign the embedding vector to the node
       Gn.nodes[node]['embedding'] = embeddings[node]
 
-  pyg_graph = convert_networkx_to_pyg(Gn)
 
-  EmbedGAN(pyg_graph,Gn)
+# Generate real neighbor pairs
+  real_neighbor_pairs = generate_real_neighbor_pairs(Gn, embedding_dictionary)
+  # Pre-train the generator with real neighbor pairs
+  fake_embeddings,generator,optimizer_G, loss_G = pre_train_G(Gn,real_neighbor_pairs)
+  fake_embeddings_detached = fake_embeddings.detach()
 
+  discriminator, optimizer_D, loss_D = pre_train_D(real_neighbor_pairs, fake_embeddings_detached)
+
+  #add embedding_dictionary as the embeddings for the last layer
+  #all other layers are according to the node_to_community mapping
+  node_embeddings = embedding_dictionary
+  feature_vectors_dict_len = len(feature_vectors_dict_list)
+  cnt = 2
+  for Gi, node_comm_mapping in zip(reversed(networkx_graphs), reversed(graphs_node_to_community)):
+    generator,discriminator = EmbedGAN(
+        Gi, 
+        node_embeddings, 
+        generator, 
+        discriminator,
+        optimizer_G, 
+        optimizer_D, 
+        loss_G,
+        loss_D)
+    
+    if node_comm_mapping:
+        node_embeddings = introduce_embedding_variations(node_embeddings, feature_vectors_dict_list[feature_vectors_dict_len - cnt], node_comm_mapping)
+    cnt = cnt+1
+    #feature_vectors_dict_list
+    #node_embeddings = assign_community_embeddings(Gi, node_comm_mapping, current_layer_node_embeddings)
+        
 def calculate_average_shortest_path_length_for_components(graph):
 
     if nx.is_directed(graph):
@@ -531,16 +665,17 @@ def filter_invalid_walks(walks, graph):
                 # as soon as an invalid step is found
                 # break
                 pass  # Or continue without breaking to try to keep valid segments
-        valid_walks.append(valid_walk)
+        if len(valid_walk) > 1 and valid_walk not in valid_walks:
+            valid_walks.append(valid_walk)
     return valid_walks
 
 def builder_sampling_strategy(networkX_Graph):
 
 	StellarGraph = sg.StellarDiGraph.from_networkx(networkX_Graph)
 
-	print("The StellaGraph edges are:\n")
-	for edge in StellarGraph.edges():
-		print(edge)  
+	# print("The StellaGraph edges are:\n")
+	# for edge in StellarGraph.edges():
+	# 	print(edge)  
 
 	rw = BiasedRandomWalk(StellarGraph)
 	av_path_length = calculate_average_shortest_path_length_for_components(networkX_Graph)
@@ -552,12 +687,107 @@ def builder_sampling_strategy(networkX_Graph):
 		  p=1,
 		  q=1,
 		  weighted=True,)
-	correct_walks = filter_invalid_walks(walks,networkX_Graph)
+	return filter_invalid_walks(walks,networkX_Graph)
 
+def get_individual_walk_embeddings(walks, node_embeddings):
+    individual_embeddings = []
+    for walk in walks:
+        current_walk = []
+        for node in walk:
+            current_walk.append(node_embeddings[str(node)])
+        individual_embeddings.append(current_walk)
+    return individual_embeddings
   
-  
+def assign_community_embeddings(graph, node_to_community, community_embeddings):
+    """
+    Assigns community embeddings to each node in the graph based on their community
+    and returns a dictionary where keys are nodes (as strings) and values are embeddings.
 
+    :param graph: networkX graph (layer Gi).
+    :param node_to_community: Dictionary mapping each node to its community in layer Gi+1.
+    :param community_embeddings: Embeddings of the communities from layer Gi+1 as a PyTorch tensor.
+    :return: Dictionary of node embeddings where keys are node identifiers as strings.
+    """
+    # Initialize the dictionary to store node embeddings
+    node_embeddings_dict = {}
+    
+    for node in graph.nodes():
+        # Get the community this node belongs to
+        community = node_to_community.get(node)
+        
+        # Assign the community's embedding to this node
+        if community is not None:
+            # Assuming community_embeddings is indexed by community ID
+            # Convert node to string for the key
+            node_embeddings_dict[str(node)] = community_embeddings[community].tolist()  # Convert tensor to list for storage
+        else:
+            # Handle cases where a node's community might not be in the mapping
+            # Convert node to string for the key
+            node_embeddings_dict[str(node)] = None
+    
+    return node_embeddings_dict
 
+def introduce_embedding_variations(embeddings, features, node_to_community_mapping, scale=0.05):
+    """
+    Assigns community embeddings to nodes and introduces variations to these embeddings based on feature vectors.
+    
+    Args:
+        embeddings (dict): Community embeddings keyed by community ID from graph Gn.
+        features (dict): Feature vectors keyed by node ID from graph Gn-1.
+        node_to_community_mapping (dict): Mapping of node IDs in Gn-1 to community IDs in Gn.
+        scale (float): Scaling factor for variations, controls the "strength" of the variation.
+        
+    Returns:
+        dict: Updated embeddings for nodes in Gn-1 after assigning community embeddings and introducing variations.
+    """
+    updated_embeddings = {} #Gn-1 embeddings
+    
+    for node, community in node_to_community_mapping.items():
+        # Assign the community embedding to the node
+        community_embedding = np.array(embeddings[str(community)])
+        # Retrieve the feature vector for this node
+        feature_vector = np.array(features[node])
+        # Generate variations based on the feature vector and scale
+        variation = np.random.normal(loc=0, scale=scale, size=community_embedding.shape)
+        # Apply the variation to the community embedding
+        updated_embedding = community_embedding + variation * feature_vector
+        updated_embeddings[str(node)] = updated_embedding
+     
+    
+    return updated_embeddings
+
+def compute_cluster_averages_from_list(membership, features):
+    """
+    Computes the average feature vector for each cluster using a membership list.
+    
+    Args:
+        membership (list): A list where the index represents the node ID and the value at each index is the cluster ID.
+        features (dict): A mapping from node ID (as integer) to feature vector.
+        
+    Returns:
+        dict: A mapping from cluster ID to its average feature vector.
+    """
+    cluster_sums = {}
+    cluster_counts = {}
+
+    # Iterate over each node and its cluster membership
+    for node_id, cluster_id in enumerate(membership):
+        # Convert node_id to int if necessary (depends on how features keys are represented)
+        node_features = np.array(features[node_id], dtype=np.float64)
+
+        if cluster_id not in cluster_sums:
+            cluster_sums[cluster_id] = node_features
+            cluster_counts[cluster_id] = 1
+        else:
+            cluster_sums[cluster_id] += node_features
+            cluster_counts[cluster_id] += 1
+
+    # Compute the average feature vector for each cluster
+    cluster_averages = {cluster: cluster_sums[cluster] / cluster_counts[cluster] for cluster in cluster_sums}
+    
+    return cluster_averages
+
+# MAIN #
 # Read the edgelist file and create a set of unique IDs
 unique_ids = set()
 with open(file_path, 'r') as file:
@@ -585,8 +815,10 @@ print(g.summary())
 feature_vectors, node_labels = readCoraMetaData(metaDataPath, id_mapping)
 edge_weights,edges = calculate_edge_weights(g,feature_vectors)
 
-# Assuming g is your igraph Graph object
-# and edge_weights is the list of weights you've calculated
+resize_feature_vectors(feature_vectors)
+
+# and edge_weights
 g.es['weight'] = edge_weights
 
-GAHNRL(g)
+#g is of type igraph
+GAHNRL(g, feature_vectors)

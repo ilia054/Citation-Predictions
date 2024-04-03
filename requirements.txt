@@ -4,3 +4,4 @@ python-igraph
 plotly
 stellargraph
 Vose-Alias-Method
+torch_optimizer
