@@ -6,7 +6,6 @@ import igraph as ig
 import numpy as np
 import torch
 import torch.nn as nn
-# import torch.optim as optim
 import torch_optimizer as optim
 import plotly.graph_objects as go
 import stellargraph as sg
@@ -14,18 +13,23 @@ from sklearn.metrics.pairwise import cosine_similarity
 from node2vec import Node2Vec
 from stellargraph.data import BiasedRandomWalk
 from sklearn.decomposition import PCA
+from sklearn.metrics import precision_recall_fscore_support
+from sklearn.model_selection import KFold
+
 
 EMBEDDING_DIMENSION = 256
 NUM_EPOCHS = 50
 BATCH_SIZE = 8
 LR = 0.0001
+EVALUATION_FREQUENCY = 10
+K_FOLD_NUM = 10
 
 
 #read cora.cites file
 file_path = "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\cora.cites"
 metaDataPath= "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\cora.content"
+output_file_path = "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\output.txt"
 data = pd.read_csv(file_path, sep='\t', names=['cited_paper_id', 'citing_paper_id'])
-
 # Create a directed graph from the dataframe
 G = nx.from_pandas_edgelist(data, source='citing_paper_id', target='cited_paper_id', create_using=nx.DiGraph())
 
@@ -490,6 +494,7 @@ def EmbedGAN(networkX_graph, node_embeddings, generator, discriminator, optimize
 
   #Train GAN
   generator, discriminator = train_GAN(
+        graph = networkX_graph,
         walks = generated_walks,
         node_embeddings = node_embeddings,
         generator = generator,
@@ -504,54 +509,86 @@ def EmbedGAN(networkX_graph, node_embeddings, generator, discriminator, optimize
 
   return generator, discriminator
 
-def train_GAN(walks, node_embeddings, generator, discriminator, optimizer_G, optimizer_D, loss_G, loss_D, num_epochs, batch_size):
-    positive_pairs = []
+def train_GAN(graph, walks, node_embeddings, generator, discriminator, optimizer_G, optimizer_D, loss_G, loss_D, num_epochs, batch_size):
+    
+    positive_pairs_walks = []
     # Extract positive samples
     for walk in walks:
         start_node, end_node = walk[0], walk[-1]
-        positive_pair = (start_node, end_node)
-        if start_node != end_node and positive_pair not in positive_pairs:# and graph.has_edge(start_node, end_node):
-            positive_pairs.append(positive_pair)
+        positive_pair_walk = (start_node, end_node)
+        if start_node != end_node and positive_pair_walk not in positive_pairs_walks:# and graph.has_edge(start_node, end_node):
+            positive_pairs_walks.append(positive_pair_walk)
 
-    positive_tensor = pairs_to_tensor(positive_pairs, node_embeddings) # Positive examples tensor
+    # Direct link pairs (actual edges in the graph)
+    direct_link_pairs = list(graph.edges())
+    
+    # Combine walk-derived and direct-link pairs=
+    combined_positive_pairs = list(set(positive_pairs_walks + direct_link_pairs))
+    positive_tensor = pairs_to_tensor(combined_positive_pairs, node_embeddings) # Positive examples tensor
 
-    for epoch in range(num_epochs):
-        # Shuffle positive pairs each epoch
-        random_positive_sample_index = torch.randperm(positive_tensor.size(0))
-        positive_tensor = positive_tensor[random_positive_sample_index]
+     # Initialize KFold
+    kf = KFold(n_splits=K_FOLD_NUM, shuffle=True, random_state=None)
+    for fold, (train_index, test_index) in enumerate(kf.split(positive_tensor)):
+        train_tensor, test_tensor = positive_tensor[train_index], positive_tensor[test_index]
+        for epoch in range(num_epochs):
+            # Shuffle positive pairs each epoch
+            random_positive_sample_index = torch.randperm(train_tensor.size(0))
+            train_tensor = train_tensor[random_positive_sample_index]
 
-        total_batches = positive_tensor.size(0) // batch_size
+            total_batches = train_tensor.size(0) // batch_size
 
-        for batch_num in range(total_batches):
-            start_index = batch_num * batch_size
-            end_index = start_index + batch_size
+            for batch_num in range(total_batches):
+                start_index = batch_num * batch_size
+                end_index = start_index + batch_size
 
-            pos_batch = positive_tensor[start_index:end_index]
+                pos_batch = train_tensor[start_index:end_index]
 
-            # Train discriminator on real data
-            optimizer_D.zero_grad()
-            real_loss = loss_D(discriminator(pos_batch), torch.ones(batch_size, 1))
-            
-            # Generate fake data
-            z = torch.randn(batch_size, EMBEDDING_DIMENSION)  # Adjust the dimension if necessary
-            neg_batch = generator(z)
-            
-            # Train discriminator on fake data
-            fake_loss = loss_D(discriminator(neg_batch), torch.zeros(batch_size, 1))
-            d_loss = real_loss + fake_loss
-            d_loss.backward()
-            optimizer_D.step()
+                # Train discriminator on real data
+                optimizer_D.zero_grad()
+                real_loss = loss_D(discriminator(pos_batch), torch.ones(batch_size, 1))
+                
+                # Generate fake data
+                z = torch.randn(batch_size, EMBEDDING_DIMENSION)  # Adjust the dimension if necessary
+                neg_batch = generator(z)
+                
+                # Train discriminator on fake data
+                fake_loss = loss_D(discriminator(neg_batch), torch.zeros(batch_size, 1))
+                d_loss = real_loss + fake_loss
+                d_loss.backward()
+                optimizer_D.step()
 
-            # Train generator
-            optimizer_G.zero_grad()
-            z = torch.randn(batch_size, EMBEDDING_DIMENSION)  # Adjust the dimension if necessary
-            gen_data = generator(z)
-            g_loss = loss_G(discriminator(gen_data), torch.ones(batch_size, 1))
-            g_loss.backward()
-            optimizer_G.step()
-            if(epoch%10 == 0):
-                print(f'Epoch: {epoch+1}, Batch: {batch_num+1}/{total_batches}, D_loss: {d_loss.item()} real loss: {real_loss}, fake loss: {fake_loss}, G_loss: {g_loss.item()}')
+                # Train generator
+                optimizer_G.zero_grad()
+                z = torch.randn(batch_size, EMBEDDING_DIMENSION)  # Adjust the dimension if necessary
+                gen_data = generator(z)
+                g_loss = loss_G(discriminator(gen_data), torch.ones(batch_size, 1))
+                g_loss.backward()
+                optimizer_G.step()
+                if(epoch == NUM_EPOCHS -1):
+                    content = f'Epoch: {epoch+1}, Batch: {batch_num+1}/{total_batches}, D_loss: {d_loss.item()} real loss: {real_loss}, fake loss: {fake_loss}, G_loss: {g_loss.item()}\n'
+                    file.write(content)
+                    #print(f'Epoch: {epoch+1}, Batch: {batch_num+1}/{total_batches}, D_loss: {d_loss.item()} real loss: {real_loss}, fake loss: {fake_loss}, G_loss: {g_loss.item()}')
 
+        # Evaluation phase
+        generator.eval()  # Switch to evaluation mode
+        discriminator.eval()
+
+        with torch.no_grad():
+            #assign labels for evaluation
+            evaluation_labels = [1 if (combined_positive_pairs[i] in direct_link_pairs) else 0 for i in test_index]
+            # Get predictions from the discriminator for the evaluation pairs
+            predictions = discriminator(test_tensor).squeeze()
+            # Convert predictions to binary (0 or 1) using 0.5 as a threshold
+            binary_predictions = (predictions >= 0.5).long().cpu().numpy()
+            # Calculate Precision, Recall, and F1 Score for the evaluation pairs
+            precision, recall, f1, _ = precision_recall_fscore_support(evaluation_labels, binary_predictions, average='binary')
+            content = f"Fold: {fold+1}, Precision: {precision}, Recall: {recall}, F1: {f1}\n"
+            #print(f"Fold: {fold+1}, Precision: {precision}, Recall: {recall}, F1: {f1}")
+            file.write(content)
+            # Switch back to training mode
+            generator.train()
+            discriminator.train()
+        print(f"Fold[{fold+1}] has been completed")
 
     return generator, discriminator
 
@@ -607,6 +644,7 @@ def GAHNRL(g, feature_vectors):
   feature_vectors_dict_len = len(feature_vectors_dict_list)
   cnt = 2
   for Gi, node_comm_mapping in zip(reversed(networkx_graphs), reversed(graphs_node_to_community)):
+    print(f"Current graph iteration: {cnt-1} out of {len(networkx_graphs)}")
     generator,discriminator = EmbedGAN(
         Gi, 
         node_embeddings, 
@@ -819,6 +857,8 @@ resize_feature_vectors(feature_vectors)
 
 # and edge_weights
 g.es['weight'] = edge_weights
+
+file = open(output_file_path, 'w')
 
 #g is of type igraph
 GAHNRL(g, feature_vectors)
