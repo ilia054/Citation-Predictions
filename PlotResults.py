@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 import re
 
-output_file_path = "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\outputs\\output.txt"
+output_file_path = "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\output.txt"
 
 # Initialize lists to store the extracted data
 Epoch_counts = []  # To track the fold count for each epoch
