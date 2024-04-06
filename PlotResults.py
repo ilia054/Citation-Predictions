@@ -1,25 +1,33 @@
 import matplotlib.pyplot as plt
 import re
-output_file_path = "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\output.txt"
+
+output_file_path = "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\outputs\\output.txt"
+
 # Initialize lists to store the extracted data
-epoch_numbers = []
-d_losses = []
+Epoch_counts = []  # To track the fold count for each epoch
+d_Fakelosses = []
+d_Reallosses = []
 g_losses = []
 precisions = []
 recalls = []
 f1_scores = []
 
+Epoch_count = 0  # Initialize fold count
+
 # Open and read the output file
 with open(output_file_path, 'r') as file:
     for line in file:
-        # Check for and parse training data
+        # Adjusted condition for parsing training data
         if "Epoch" in line:
             epoch_match = re.search(r'Epoch: (\d+)', line)
-            d_loss_match = re.search(r'D_loss: ([\d.]+)', line)
+            d_Fakeloss_match = re.search(r'fake loss: ([\d.]+)', line)
+            d_Realloss_match = re.search(r'real loss: ([\d.]+)', line)
             g_loss_match = re.search(r'G_loss: ([\d.]+)', line)
-            if epoch_match and d_loss_match and g_loss_match:
-                epoch_numbers.append(int(epoch_match.group(1)))
-                d_losses.append(float(d_loss_match.group(1)))
+            if epoch_match and d_Fakeloss_match and g_loss_match and d_Realloss_match:
+                Epoch_count += 1  # Increment epoch count 
+                Epoch_counts.append(Epoch_count)
+                d_Fakelosses.append(float(d_Fakeloss_match.group(1)))
+                d_Reallosses.append(float(d_Realloss_match.group(1)))
                 g_losses.append(float(g_loss_match.group(1)))
         
         # Check for and parse evaluation data
@@ -35,10 +43,11 @@ with open(output_file_path, 'r') as file:
 # Plotting
 fig, axs = plt.subplots(2, 1, figsize=(10, 10))
 
-# Plot for training losses
-axs[0].plot(epoch_numbers, d_losses, label='Discriminator Loss')
-axs[0].plot(epoch_numbers, g_losses, label='Generator Loss')
-axs[0].set_xlabel('Epoch')
+# Adjusted plot for training losses to include fold information
+axs[0].plot(Epoch_counts, d_Fakelosses, label='Discriminator Fake Loss')
+axs[0].plot(Epoch_counts, d_Reallosses, label='Discriminator Real Loss')
+axs[0].plot(Epoch_counts, g_losses, label='Generator Loss')
+axs[0].set_xlabel('Epoch')  # Adjusted xlabel to represent fold
 axs[0].set_ylabel('Loss')
 axs[0].set_title('Training Losses Over Epochs')
 axs[0].legend()

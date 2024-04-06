@@ -22,13 +22,14 @@ NUM_EPOCHS = 50
 BATCH_SIZE = 8
 LR = 0.0001
 EVALUATION_FREQUENCY = 10
-K_FOLD_NUM = 10
+K_FOLD_NUM = 5
 
 
 #read cora.cites file
 file_path = "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\cora.cites"
 metaDataPath= "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\cora.content"
 output_file_path = "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\output.txt"
+
 data = pd.read_csv(file_path, sep='\t', names=['cited_paper_id', 'citing_paper_id'])
 # Create a directed graph from the dataframe
 G = nx.from_pandas_edgelist(data, source='citing_paper_id', target='cited_paper_id', create_using=nx.DiGraph())
@@ -268,7 +269,7 @@ def get_old_id_by_new_id(new_id_from,new_id_to, id_mapping):
 
 def Node2VecAlg(graph):
 
-  #Ensure your graph 'G' is a directed NetworkX graph as you've created with nx.DiGraph()
+  #Ensure that graph 'G' is a directed NetworkX graph as created with nx.DiGraph()
 
   # Initialize Node2Vec model. Parameters can be tuned as per your requirement.
   # For directed graphs, set 'walk_length', 'num_walks', and 'workers' as per your computational resources.
@@ -345,13 +346,6 @@ def convert_igraph_to_networkx(igraph_graph):
         nx_graph.add_edge(source, target, weight=weight)
 
     return nx_graph
-
-def print_sample_mapping(node_to_community, sample_size=5):
-    print("Sample Node to Community Mapping:")
-    # If the graph is small or you want to print all mappings, you can adjust sample_size accordingly
-    sample_nodes = random.sample(list(node_to_community.keys()), min(sample_size, len(node_to_community)))
-    for node in sample_nodes:
-        print(f"Node {node} -> Community {node_to_community[node]}")
 
 def LF_NetLay(graph, feature_vectors):
   # Apply the Infomap algorithm
@@ -493,7 +487,7 @@ def EmbedGAN(networkX_graph, node_embeddings, generator, discriminator, optimize
   generated_walks = builder_sampling_strategy(networkX_graph)
 
   #Train GAN
-  generator, discriminator = train_GAN(
+  generator, discriminator, optimizer_G, optimizer_D = train_GAN(
         graph = networkX_graph,
         walks = generated_walks,
         node_embeddings = node_embeddings,
@@ -507,10 +501,11 @@ def EmbedGAN(networkX_graph, node_embeddings, generator, discriminator, optimize
         batch_size = BATCH_SIZE
     )
 
-  return generator, discriminator
+  return generator, discriminator, optimizer_G, optimizer_D
 
 def train_GAN(graph, walks, node_embeddings, generator, discriminator, optimizer_G, optimizer_D, loss_G, loss_D, num_epochs, batch_size):
     
+    k_fold_num = K_FOLD_NUM
     positive_pairs_walks = []
     # Extract positive samples
     for walk in walks:
@@ -521,13 +516,15 @@ def train_GAN(graph, walks, node_embeddings, generator, discriminator, optimizer
 
     # Direct link pairs (actual edges in the graph)
     direct_link_pairs = list(graph.edges())
-    
     # Combine walk-derived and direct-link pairs=
     combined_positive_pairs = list(set(positive_pairs_walks + direct_link_pairs))
     positive_tensor = pairs_to_tensor(combined_positive_pairs, node_embeddings) # Positive examples tensor
 
      # Initialize KFold
-    kf = KFold(n_splits=K_FOLD_NUM, shuffle=True, random_state=None)
+    if(graph.number_of_nodes()> 2000):
+        k_fold_num = 10
+
+    kf = KFold(n_splits=k_fold_num, shuffle=True, random_state=None)
     for fold, (train_index, test_index) in enumerate(kf.split(positive_tensor)):
         train_tensor, test_tensor = positive_tensor[train_index], positive_tensor[test_index]
         for epoch in range(num_epochs):
@@ -536,7 +533,7 @@ def train_GAN(graph, walks, node_embeddings, generator, discriminator, optimizer
             train_tensor = train_tensor[random_positive_sample_index]
 
             total_batches = train_tensor.size(0) // batch_size
-
+            avarage_metrics = [0,0,0,0] #Dloss,Dreal,Dfake,Gloss
             for batch_num in range(total_batches):
                 start_index = batch_num * batch_size
                 end_index = start_index + batch_size
@@ -564,10 +561,14 @@ def train_GAN(graph, walks, node_embeddings, generator, discriminator, optimizer
                 g_loss = loss_G(discriminator(gen_data), torch.ones(batch_size, 1))
                 g_loss.backward()
                 optimizer_G.step()
-                if(epoch == NUM_EPOCHS -1):
-                    content = f'Epoch: {epoch+1}, Batch: {batch_num+1}/{total_batches}, D_loss: {d_loss.item()} real loss: {real_loss}, fake loss: {fake_loss}, G_loss: {g_loss.item()}\n'
-                    file.write(content)
-                    #print(f'Epoch: {epoch+1}, Batch: {batch_num+1}/{total_batches}, D_loss: {d_loss.item()} real loss: {real_loss}, fake loss: {fake_loss}, G_loss: {g_loss.item()}')
+                avarage_metrics[0] = avarage_metrics[0] + d_loss.item()
+                avarage_metrics[1] = avarage_metrics[1] + real_loss
+                avarage_metrics[2] = avarage_metrics[2] + fake_loss
+                avarage_metrics[3] = avarage_metrics[3] + g_loss.item()
+                #print(f'Epoch: {epoch+1}, Batch: {batch_num+1}/{total_batches}, D_loss: {d_loss.item()} real loss: {real_loss}, fake loss: {fake_loss}, G_loss: {g_loss.item()}')
+
+            content = f'Epoch: {epoch+1}, D_loss: {avarage_metrics[0] / total_batches} real loss: {avarage_metrics[1] / total_batches}, fake loss: {avarage_metrics[2] / total_batches}, G_loss: {avarage_metrics[3] / total_batches}\n'
+            file.write(content)
 
         # Evaluation phase
         generator.eval()  # Switch to evaluation mode
@@ -576,6 +577,15 @@ def train_GAN(graph, walks, node_embeddings, generator, discriminator, optimizer
         with torch.no_grad():
             #assign labels for evaluation
             evaluation_labels = [1 if (combined_positive_pairs[i] in direct_link_pairs) else 0 for i in test_index]
+            pos = 0
+            neg = 0
+            for i in evaluation_labels:
+                if i == 1:
+                    pos = pos + 1
+                else:
+                    neg = neg + 1
+
+            ratio = neg / len(evaluation_labels)
             # Get predictions from the discriminator for the evaluation pairs
             predictions = discriminator(test_tensor).squeeze()
             # Convert predictions to binary (0 or 1) using 0.5 as a threshold
@@ -585,12 +595,13 @@ def train_GAN(graph, walks, node_embeddings, generator, discriminator, optimizer
             content = f"Fold: {fold+1}, Precision: {precision}, Recall: {recall}, F1: {f1}\n"
             #print(f"Fold: {fold+1}, Precision: {precision}, Recall: {recall}, F1: {f1}")
             file.write(content)
+            
             # Switch back to training mode
             generator.train()
             discriminator.train()
         print(f"Fold[{fold+1}] has been completed")
 
-    return generator, discriminator
+    return generator, discriminator, optimizer_G, optimizer_D
 
 def GAHNRL(g, feature_vectors):
   coarsed_graphs = [g]
@@ -645,7 +656,7 @@ def GAHNRL(g, feature_vectors):
   cnt = 2
   for Gi, node_comm_mapping in zip(reversed(networkx_graphs), reversed(graphs_node_to_community)):
     print(f"Current graph iteration: {cnt-1} out of {len(networkx_graphs)}")
-    generator,discriminator = EmbedGAN(
+    generator,discriminator,optimizer_G,optimizer_D = EmbedGAN(
         Gi, 
         node_embeddings, 
         generator, 
@@ -658,8 +669,6 @@ def GAHNRL(g, feature_vectors):
     if node_comm_mapping:
         node_embeddings = introduce_embedding_variations(node_embeddings, feature_vectors_dict_list[feature_vectors_dict_len - cnt], node_comm_mapping)
     cnt = cnt+1
-    #feature_vectors_dict_list
-    #node_embeddings = assign_community_embeddings(Gi, node_comm_mapping, current_layer_node_embeddings)
         
 def calculate_average_shortest_path_length_for_components(graph):
 
@@ -736,35 +745,6 @@ def get_individual_walk_embeddings(walks, node_embeddings):
         individual_embeddings.append(current_walk)
     return individual_embeddings
   
-def assign_community_embeddings(graph, node_to_community, community_embeddings):
-    """
-    Assigns community embeddings to each node in the graph based on their community
-    and returns a dictionary where keys are nodes (as strings) and values are embeddings.
-
-    :param graph: networkX graph (layer Gi).
-    :param node_to_community: Dictionary mapping each node to its community in layer Gi+1.
-    :param community_embeddings: Embeddings of the communities from layer Gi+1 as a PyTorch tensor.
-    :return: Dictionary of node embeddings where keys are node identifiers as strings.
-    """
-    # Initialize the dictionary to store node embeddings
-    node_embeddings_dict = {}
-    
-    for node in graph.nodes():
-        # Get the community this node belongs to
-        community = node_to_community.get(node)
-        
-        # Assign the community's embedding to this node
-        if community is not None:
-            # Assuming community_embeddings is indexed by community ID
-            # Convert node to string for the key
-            node_embeddings_dict[str(node)] = community_embeddings[community].tolist()  # Convert tensor to list for storage
-        else:
-            # Handle cases where a node's community might not be in the mapping
-            # Convert node to string for the key
-            node_embeddings_dict[str(node)] = None
-    
-    return node_embeddings_dict
-
 def introduce_embedding_variations(embeddings, features, node_to_community_mapping, scale=0.05):
     """
     Assigns community embeddings to nodes and introduces variations to these embeddings based on feature vectors.
