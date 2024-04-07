@@ -26,9 +26,9 @@ K_FOLD_NUM = 5
 
 
 #read cora.cites file
-file_path = "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\cora.cites"
-metaDataPath= "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\cora.content"
-output_file_path = "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\output.txt"
+file_path = "C:\\Users\\biran\\OneDrive\\Desktop\\braude\\Semester 8\\Final Project Part B\\cora\\cora.cites"
+metaDataPath= "C:\\Users\\biran\\OneDrive\\Desktop\\braude\\Semester 8\\Final Project Part B\\cora\\cora.content"
+output_file_path = "C:\\Users\\biran\\OneDrive\\Desktop\\braude\\Semester 8\\Final Project Part B\\cora\\output.txt"
 
 data = pd.read_csv(file_path, sep='\t', names=['cited_paper_id', 'citing_paper_id'])
 # Create a directed graph from the dataframe
@@ -40,7 +40,6 @@ class Generator(nn.Module):
         self.model = nn.Sequential(
             nn.Linear(latent_dim, EMBEDDING_DIMENSION), # Adjust to your architecture needs
             nn.ReLU(),
-            nn.Dropout(0.2),
             nn.Linear(EMBEDDING_DIMENSION, EMBEDDING_DIMENSION),       # This should match the concatenated vector size
             # Add more layers if necessary
         )
@@ -54,10 +53,8 @@ class Discriminator(nn.Module):
         self.model = nn.Sequential(
             nn.Linear(EMBEDDING_DIMENSION, EMBEDDING_DIMENSION // 2),       # Input layer now takes 256-dimensional vector
             nn.LeakyReLU(),
-            nn.Dropout(0.1),
             nn.Linear(EMBEDDING_DIMENSION // 2, EMBEDDING_DIMENSION // 4),
             nn.LeakyReLU(),
-            nn.Dropout(0.1),
             nn.Linear(EMBEDDING_DIMENSION // 4, 1),
             nn.Sigmoid()
         )
@@ -643,7 +640,6 @@ def GAHNRL(g, feature_vectors):
       # Assign the embedding vector to the node
       Gn.nodes[node]['embedding'] = embeddings[node]
 
-
 # Generate real neighbor pairs
   real_neighbor_pairs = generate_real_neighbor_pairs(Gn, embedding_dictionary)
   # Pre-train the generator with real neighbor pairs
@@ -672,7 +668,32 @@ def GAHNRL(g, feature_vectors):
     if node_comm_mapping:
         node_embeddings = introduce_embedding_variations(node_embeddings, feature_vectors_dict_list[feature_vectors_dict_len - cnt], node_comm_mapping)
     cnt = cnt+1
-        
+
+  neighbor_pairs = generate_real_neighbor_pairs(networkx_graphs[0], node_embeddings)
+
+  # Calculate the number of pairs to select
+  precentage = 0.3
+  num_pairs = neighbor_pairs.shape[0]
+  num_select = int(precentage * num_pairs)
+
+  # Shuffle the indices and select the first 30%
+  shuffled_indices = torch.randperm(num_pairs)
+  selected_indices = shuffled_indices[:num_select]
+
+  # Extract the selected pairs
+  selected_pairs_tensor = neighbor_pairs[selected_indices]
+
+  predictions = discriminator(selected_pairs_tensor).squeeze()
+  # Convert predictions to binary (0 or 1) using 0.5 as a threshold
+  binary_predictions = (predictions >= 0.5).long().cpu().numpy()
+  # Calculate Precision, Recall, and F1 Score for the evaluation pairs
+
+  num_ones = np.sum(binary_predictions == 1)
+  num_zeros = np.sum(binary_predictions == 0)
+
+  print(f"Number of relevant connections: {num_ones}")
+  print(f"Number of irrelevant: {num_zeros}")
+
 def calculate_average_shortest_path_length_for_components(graph):
 
     if nx.is_directed(graph):
