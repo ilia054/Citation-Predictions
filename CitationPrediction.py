@@ -1,9 +1,9 @@
 import math
-import random
 import pandas as pd
 import networkx as nx
 import igraph as ig
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch_optimizer as optim
@@ -26,9 +26,10 @@ K_FOLD_NUM = 5
 
 
 #read cora.cites file
-file_path = "C:\\Users\\biran\\OneDrive\\Desktop\\braude\\Semester 8\\Final Project Part B\\cora\\cora.cites"
-metaDataPath= "C:\\Users\\biran\\OneDrive\\Desktop\\braude\\Semester 8\\Final Project Part B\\cora\\cora.content"
-output_file_path = "C:\\Users\\biran\\OneDrive\\Desktop\\braude\\Semester 8\\Final Project Part B\\cora\\output.txt"
+file_path = "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\cora.cites"
+metaDataPath= "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\cora.content"
+output_file_path = "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\output.txt"
+predictions_results_file_path = "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\prediction_results.txt"
 
 data = pd.read_csv(file_path, sep='\t', names=['cited_paper_id', 'citing_paper_id'])
 # Create a directed graph from the dataframe
@@ -95,7 +96,16 @@ class EarlyStopping:
                 print('Early stopping triggered')
                 self.early_stop = True
 # End of Class
-           
+def create_excel(edge_sampled):
+    # Transform the edge_sampled dict into a list of lists, each sublist containing the data for one row
+    data = [[source, destination, sampled_count, success_percentage] for (source, destination), (sampled_count, success_percentage) in edge_sampled.items()]
+    
+    # Create a DataFrame with the data and the specified column names
+    df = pd.DataFrame(data, columns=['Source Node', 'Destination Node', 'Sampled Amount', 'Success Rate'])
+    
+    # Save the DataFrame to an Excel file
+    df.to_excel('edge_sampled_data.xlsx', index=False)
+
 def print_graph(g):
   # Get the positions of the nodes using a layout
   layout = g.layout("kk")
@@ -319,6 +329,7 @@ def generate_real_neighbor_pairs(graph, embeddings_dict):
 
     # Convert the list of tensors to a single tensor
     real_neighbor_pairs = torch.stack(real_pairs_list)
+
     return real_neighbor_pairs
 
 def convert_igraph_to_networkx(igraph_graph):
@@ -603,97 +614,6 @@ def train_GAN(graph, walks, node_embeddings, generator, discriminator, optimizer
 
     return generator, discriminator, optimizer_G, optimizer_D
 
-def GAHNRL(g, feature_vectors):
-  coarsed_graphs = [g]
-  graphs_node_to_community = [{}]
-  networkx_graphs = []
-  feature_vectors_dict_list = [feature_vectors]
-
-  while(len(g.get_edgelist()) > 1):
-    G,current_graph_node_mapping,current_graph_feature_vec = LF_NetLay(g, feature_vectors_dict_list[-1])
-    if(len(G.get_edgelist()) < 5):
-      break
-    else:
-      coarsed_graphs.append(G)
-      graphs_node_to_community.append(current_graph_node_mapping)
-      feature_vectors_dict_list.append(current_graph_feature_vec)
-      #print(f"Before normalization:{G.es['weight']}")
-      normalized_weights = bounded_min_max_normalization(G.es['weight'])
-      G.es['weight'] = normalized_weights  # Update the graph with normalized weights
-      #print(f"After normalization:{G.es['weight']}")
-      g = G
-
-  print(g.summary())
-  print(coarsed_graphs)
-
-  for graph in coarsed_graphs:
-    networkXg = convert_igraph_to_networkx(graph)
-    networkx_graphs.append(networkXg)
-
-  Gn=networkx_graphs[len(networkx_graphs)-1]
-  embeddings,embedding_dictionary = Node2VecAlg(Gn)
-
-  # Iterate over each node in the graph
-  for node in Gn.nodes():
-    # Node2Vec uses string identifiers by default, so ensure consistency in key type
-    if node in embeddings:
-      # Assign the embedding vector to the node
-      Gn.nodes[node]['embedding'] = embeddings[node]
-
-# Generate real neighbor pairs
-  real_neighbor_pairs = generate_real_neighbor_pairs(Gn, embedding_dictionary)
-  # Pre-train the generator with real neighbor pairs
-  fake_embeddings,generator,optimizer_G, loss_G = pre_train_G(Gn,real_neighbor_pairs)
-  fake_embeddings_detached = fake_embeddings.detach()
-
-  discriminator, optimizer_D, loss_D = pre_train_D(real_neighbor_pairs, fake_embeddings_detached)
-
-  #add embedding_dictionary as the embeddings for the last layer
-  #all other layers are according to the node_to_community mapping
-  node_embeddings = embedding_dictionary
-  feature_vectors_dict_len = len(feature_vectors_dict_list)
-  cnt = 2
-  for Gi, node_comm_mapping in zip(reversed(networkx_graphs), reversed(graphs_node_to_community)):
-    print(f"Current graph iteration: {cnt-1} out of {len(networkx_graphs)}")
-    generator,discriminator,optimizer_G,optimizer_D = EmbedGAN(
-        Gi, 
-        node_embeddings, 
-        generator, 
-        discriminator,
-        optimizer_G, 
-        optimizer_D, 
-        loss_G,
-        loss_D)
-    
-    if node_comm_mapping:
-        node_embeddings = introduce_embedding_variations(node_embeddings, feature_vectors_dict_list[feature_vectors_dict_len - cnt], node_comm_mapping)
-    cnt = cnt+1
-
-  neighbor_pairs = generate_real_neighbor_pairs(networkx_graphs[0], node_embeddings)
-
-  # Calculate the number of pairs to select
-  precentage = 0.3
-  num_pairs = neighbor_pairs.shape[0]
-  num_select = int(precentage * num_pairs)
-
-  # Shuffle the indices and select the first 30%
-  shuffled_indices = torch.randperm(num_pairs)
-  selected_indices = shuffled_indices[:num_select]
-
-  # Extract the selected pairs
-  selected_pairs_tensor = neighbor_pairs[selected_indices]
-
-  predictions = discriminator(selected_pairs_tensor).squeeze()
-  # Convert predictions to binary (0 or 1) using 0.5 as a threshold
-  binary_predictions = (predictions >= 0.5).long().cpu().numpy()
-  # Calculate Precision, Recall, and F1 Score for the evaluation pairs
-
-  num_ones = np.sum(binary_predictions == 1)
-  num_zeros = np.sum(binary_predictions == 0)
-
-  print(f"Number of relevant connections: {num_ones}")
-  print(f"Number of irrelevant: {num_zeros}")
-
 def calculate_average_shortest_path_length_for_components(graph):
 
     if nx.is_directed(graph):
@@ -829,6 +749,150 @@ def compute_cluster_averages_from_list(membership, features):
     
     return cluster_averages
 
+def GAHNRL(g, feature_vectors):
+    coarsed_graphs = [g]
+    graphs_node_to_community = [{}]
+    networkx_graphs = []
+    feature_vectors_dict_list = [feature_vectors]
+
+    while(len(g.get_edgelist()) > 1):
+        G,current_graph_node_mapping,current_graph_feature_vec = LF_NetLay(g, feature_vectors_dict_list[-1])
+        if(len(G.get_edgelist()) < 5):
+            break
+        else:
+            coarsed_graphs.append(G)
+            graphs_node_to_community.append(current_graph_node_mapping)
+            feature_vectors_dict_list.append(current_graph_feature_vec)
+            #print(f"Before normalization:{G.es['weight']}")
+            normalized_weights = bounded_min_max_normalization(G.es['weight'])
+            G.es['weight'] = normalized_weights  # Update the graph with normalized weights
+            #print(f"After normalization:{G.es['weight']}")
+            g = G
+
+    print(g.summary())
+    print(coarsed_graphs)
+
+    for graph in coarsed_graphs:
+        networkXg = convert_igraph_to_networkx(graph)
+        networkx_graphs.append(networkXg)
+
+    Gn=networkx_graphs[len(networkx_graphs)-1]
+    embeddings,embedding_dictionary = Node2VecAlg(Gn)
+
+	# Iterate over each node in the graph
+    for node in Gn.nodes():
+        # Node2Vec uses string identifiers by default, so ensure consistency in key type
+        if node in embeddings:
+            # Assign the embedding vector to the node
+            Gn.nodes[node]['embedding'] = embeddings[node]
+
+	# Generate real neighbor pairs
+    real_neighbor_pairs = generate_real_neighbor_pairs(Gn, embedding_dictionary)
+    
+	# Pre-train the generator with real neighbor pairs
+    fake_embeddings,generator,optimizer_G, loss_G = pre_train_G(Gn,real_neighbor_pairs)
+    fake_embeddings_detached = fake_embeddings.detach()
+
+    discriminator, optimizer_D, loss_D = pre_train_D(real_neighbor_pairs, fake_embeddings_detached)
+
+	#add embedding_dictionary as the embeddings for the last layer
+	#all other layers are according to the node_to_community mapping
+    node_embeddings = embedding_dictionary
+    feature_vectors_dict_len = len(feature_vectors_dict_list)
+    cnt = 2
+    for Gi, node_comm_mapping in zip(reversed(networkx_graphs), reversed(graphs_node_to_community)):
+        print(f"Current graph iteration: {cnt-1} out of {len(networkx_graphs)}")
+        generator,discriminator,optimizer_G,optimizer_D = EmbedGAN(
+            Gi, 
+            node_embeddings, 
+            generator, 
+            discriminator,
+            optimizer_G, 
+            optimizer_D, 
+            loss_G,
+            loss_D)
+
+        if node_comm_mapping:
+            node_embeddings = introduce_embedding_variations(node_embeddings, feature_vectors_dict_list[feature_vectors_dict_len - cnt], node_comm_mapping)
+        cnt = cnt+1
+
+    neighbor_pairs = generate_real_neighbor_pairs(networkx_graphs[0], node_embeddings,)
+    
+    make_final_predictions(neighbor_pairs, discriminator,list(networkx_graphs[0].edges()))
+
+def make_final_predictions(neighbor_pairs, discriminator,edge_list):
+
+    # Initialize the dictionaries
+    edge_sampled = {}  # Key: (source, destination), Value: (sampled_count, success_count)
+
+    content = f"Start final prediction phase\n"
+    predictions_file.write(content)
+    print(f"Start final prediction phase\n")
+
+	# Reverse the id_mapping to get from new IDs back to original IDs
+    reverse_id_mapping = {new_id: old_id for old_id, new_id in id_mapping.items()}
+
+    number_of_iterations = 1
+    for iteration in range(number_of_iterations):
+        print(f"Iteration Number {iteration+1}")
+        content = f"Iteration Number {iteration+1}\n"
+        predictions_file.write(content)
+
+        # Calculate the number of pairs to select
+        precentage = 0.3
+        num_pairs = neighbor_pairs.shape[0]
+        num_select = int(precentage * num_pairs)
+
+        # Shuffle the indices and select the first 30%
+        shuffled_indices = torch.randperm(num_pairs)
+        selected_indices = shuffled_indices[:num_select]
+
+        # Extract the selected pairs
+        selected_pairs_tensor = neighbor_pairs[selected_indices] #size num_select
+
+        predictions = discriminator(selected_pairs_tensor).squeeze()
+        # Convert predictions to binary (0 or 1) using 0.5 as a threshold
+        binary_predictions = (predictions >= 0.5).long().cpu().numpy()
+
+        num_ones = np.sum(binary_predictions == 1)
+        num_zeros = np.sum(binary_predictions == 0)
+
+        print(f"Number of relevant connections: {num_ones}")
+        print(f"Number of irrelevant: {num_zeros}")
+        print(f"Success Rate: {num_ones / (num_zeros + num_ones)}")
+
+        content = f"Number of relevant connections: {num_ones}\nNumber of irrelevant: {num_zeros}\nSuccess Rate: {num_ones / (num_zeros + num_ones)}\n"
+        predictions_file.write(content)
+
+        # Iterate over selected pairs and their predictions
+        for idx, (edge_index, prediction) in enumerate(zip(selected_indices, binary_predictions)):
+            # Get the original IDs for the selected pair
+            a_new, b_new = edge_list[edge_index]  # Assuming tensor to list conversion works here
+            a, b = reverse_id_mapping[a_new], reverse_id_mapping[b_new]
+            
+            # Initialize or update the sampled count
+            if (a, b) not in edge_sampled:
+                edge_sampled[(a, b)] = [1, 0]  # Initialize with 1 sample, 0 successes
+            else:
+                edge_sampled[(a, b)][0] +=1  # Increment sample count
+            
+            # Update success count based on prediction
+            if prediction == 1:  # Success
+                edge_sampled[(a, b)][1] +=1  # Increment success count
+
+    # After all runs, calculate success rates
+    for edge, counts in edge_sampled.items():
+        sampled_count = counts[0]
+        successes = counts[1]
+        success_rate = successes / sampled_count
+        edge_sampled[edge] = (sampled_count, success_rate)
+        content = f"{edge} : sampled count: {sampled_count} success_rate {success_rate}\n"
+        predictions_file.write(content)
+
+    # Generate the final excel sheet for the results:
+    create_excel(edge_sampled)
+
+
 # MAIN #
 # Read the edgelist file and create a set of unique IDs
 unique_ids = set()
@@ -863,6 +927,8 @@ resize_feature_vectors(feature_vectors)
 g.es['weight'] = edge_weights
 
 file = open(output_file_path, 'w')
+
+predictions_file = open(predictions_results_file_path, 'w')
 
 #g is of type igraph
 GAHNRL(g, feature_vectors)
