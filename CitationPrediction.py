@@ -24,16 +24,11 @@ LR = 0.0001
 EVALUATION_FREQUENCY = 10
 K_FOLD_NUM = 5
 
-
 #read cora.cites file
 file_path = "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\cora.cites"
 metaDataPath= "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\cora.content"
-output_file_path = "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\output.txt"
-predictions_results_file_path = "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\prediction_results.txt"
-
-data = pd.read_csv(file_path, sep='\t', names=['cited_paper_id', 'citing_paper_id'])
-# Create a directed graph from the dataframe
-G = nx.from_pandas_edgelist(data, source='citing_paper_id', target='cited_paper_id', create_using=nx.DiGraph())
+output_file_path = "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\output"
+predictions_results_file_path = "C:\\Users\\ilia0\\Desktop\\Final Semester\\Cora\\cora\\prediction_results"
 
 class Generator(nn.Module):
     def __init__(self, latent_dim):
@@ -96,12 +91,12 @@ class EarlyStopping:
                 print('Early stopping triggered')
                 self.early_stop = True
 # End of Class
-def create_excel(edge_sampled):
+def create_excel(edge_sampled, original_ID_node_field):
     # Transform the edge_sampled dict into a list of lists, each sublist containing the data for one row
-    data = [[source, destination, sampled_count, success_percentage] for (source, destination), (sampled_count, success_percentage) in edge_sampled.items()]
+    data = [[source, destination, original_ID_node_field[source], original_ID_node_field[destination], sampled_count, success_percentage] for (source, destination), (sampled_count, success_percentage) in edge_sampled.items()]
     
     # Create a DataFrame with the data and the specified column names
-    df = pd.DataFrame(data, columns=['Source Node', 'Destination Node', 'Sampled Amount', 'Success Rate'])
+    df = pd.DataFrame(data, columns=['Source Node', 'Destination Node','Source Field', 'Destination Field','Sampled Amount', 'Success Rate'])
     
     # Save the DataFrame to an Excel file
     df.to_excel('edge_sampled_data.xlsx', index=False)
@@ -169,7 +164,7 @@ def coarsen_weighted_graph(original_graph, communities, edge_weights):
     # Add aggregated edges and their summed weights to the coarsened graph
     for (source, target), weight in coarsened_edges_weights.items():
         coarsened_graph.add_edge(source, target)
-        g.es[g.ecount()-1]['weight'] = weight
+        #g.es[g.ecount()-1]['weight'] = weight
         final_weights.append(weight)
 
     coarsened_graph.es['weight']=final_weights
@@ -210,7 +205,7 @@ def readCoraMetaData(file_path, id_mapping):
             if original_id in id_mapping:
                 new_id = id_mapping[original_id]
                 features[new_id] = feature_vector
-                labels[new_id] = label
+                labels[original_id] = label
             else:
                 print(f"Warning: Node ID {original_id} not found in id_mapping.")
 
@@ -492,7 +487,7 @@ def pre_train_D(real_neighbor_pairs, fake_embeddings):
 
     return discriminator, optimizer_D, loss_function
  
-def EmbedGAN(networkX_graph, node_embeddings, generator, discriminator, optimizer_G, optimizer_D, loss_G, loss_D):
+def EmbedGAN(networkX_graph, node_embeddings, generator, discriminator, optimizer_G, optimizer_D, loss_G, loss_D, output_file):
   
   #Random Walk
   generated_walks = builder_sampling_strategy(networkX_graph)
@@ -509,12 +504,13 @@ def EmbedGAN(networkX_graph, node_embeddings, generator, discriminator, optimize
         loss_G = loss_G,
         loss_D = loss_D,
         num_epochs = NUM_EPOCHS,
-        batch_size = BATCH_SIZE
+        batch_size = BATCH_SIZE,
+        output_file = output_file
     )
 
   return generator, discriminator, optimizer_G, optimizer_D
 
-def train_GAN(graph, walks, node_embeddings, generator, discriminator, optimizer_G, optimizer_D, loss_G, loss_D, num_epochs, batch_size):
+def train_GAN(graph, walks, node_embeddings, generator, discriminator, optimizer_G, optimizer_D, loss_G, loss_D, num_epochs, batch_size, output_file):
     
     k_fold_num = K_FOLD_NUM
     positive_pairs_walks = []
@@ -531,7 +527,7 @@ def train_GAN(graph, walks, node_embeddings, generator, discriminator, optimizer
     combined_positive_pairs = list(set(positive_pairs_walks + direct_link_pairs))
     positive_tensor = pairs_to_tensor(combined_positive_pairs, node_embeddings) # Positive examples tensor
 
-     # Initialize KFold
+    #  # Initialize KFold
     if(graph.number_of_nodes()> 2000):
         k_fold_num = 10
 
@@ -579,7 +575,7 @@ def train_GAN(graph, walks, node_embeddings, generator, discriminator, optimizer
                 #print(f'Epoch: {epoch+1}, Batch: {batch_num+1}/{total_batches}, D_loss: {d_loss.item()} real loss: {real_loss}, fake loss: {fake_loss}, G_loss: {g_loss.item()}')
 
             content = f'Epoch: {epoch+1}, D_loss: {avarage_metrics[0] / total_batches} real loss: {avarage_metrics[1] / total_batches}, fake loss: {avarage_metrics[2] / total_batches}, G_loss: {avarage_metrics[3] / total_batches}\n'
-            file.write(content)
+            output_file.write(content)
 
         # Evaluation phase
         generator.eval()  # Switch to evaluation mode
@@ -605,7 +601,7 @@ def train_GAN(graph, walks, node_embeddings, generator, discriminator, optimizer
             precision, recall, f1, _ = precision_recall_fscore_support(evaluation_labels, binary_predictions, average='binary')
             content = f"Fold: {fold+1}, Precision: {precision}, Recall: {recall}, F1: {f1}\n"
             #print(f"Fold: {fold+1}, Precision: {precision}, Recall: {recall}, F1: {f1}")
-            file.write(content)
+            output_file.write(content)
             
             # Switch back to training mode
             generator.train()
@@ -749,7 +745,7 @@ def compute_cluster_averages_from_list(membership, features):
     
     return cluster_averages
 
-def GAHNRL(g, feature_vectors):
+def GAHNRL(g, feature_vectors, id_mapping, output_file, predictions_file):
     coarsed_graphs = [g]
     graphs_node_to_community = [{}]
     networkx_graphs = []
@@ -763,10 +759,8 @@ def GAHNRL(g, feature_vectors):
             coarsed_graphs.append(G)
             graphs_node_to_community.append(current_graph_node_mapping)
             feature_vectors_dict_list.append(current_graph_feature_vec)
-            #print(f"Before normalization:{G.es['weight']}")
             normalized_weights = bounded_min_max_normalization(G.es['weight'])
             G.es['weight'] = normalized_weights  # Update the graph with normalized weights
-            #print(f"After normalization:{G.es['weight']}")
             g = G
 
     print(g.summary())
@@ -810,7 +804,8 @@ def GAHNRL(g, feature_vectors):
             optimizer_G, 
             optimizer_D, 
             loss_G,
-            loss_D)
+            loss_D,
+            output_file)
 
         if node_comm_mapping:
             node_embeddings = introduce_embedding_variations(node_embeddings, feature_vectors_dict_list[feature_vectors_dict_len - cnt], node_comm_mapping)
@@ -818,13 +813,9 @@ def GAHNRL(g, feature_vectors):
 
     neighbor_pairs = generate_real_neighbor_pairs(networkx_graphs[0], node_embeddings,)
     
-    make_final_predictions(neighbor_pairs, discriminator,list(networkx_graphs[0].edges()))
+    make_final_predictions(neighbor_pairs, discriminator,list(networkx_graphs[0].edges()),id_mapping, predictions_file)
 
-def make_final_predictions(neighbor_pairs, discriminator,edge_list):
-
-    # Initialize the dictionaries
-    edge_sampled = {}  # Key: (source, destination), Value: (sampled_count, success_count)
-
+def make_final_predictions(neighbor_pairs, discriminator,edge_list, id_mapping, predictions_file):
     content = f"Start final prediction phase\n"
     predictions_file.write(content)
     print(f"Start final prediction phase\n")
@@ -832,53 +823,90 @@ def make_final_predictions(neighbor_pairs, discriminator,edge_list):
 	# Reverse the id_mapping to get from new IDs back to original IDs
     reverse_id_mapping = {new_id: old_id for old_id, new_id in id_mapping.items()}
 
-    number_of_iterations = 1
-    for iteration in range(number_of_iterations):
-        print(f"Iteration Number {iteration+1}")
-        content = f"Iteration Number {iteration+1}\n"
-        predictions_file.write(content)
+     # Calculate the number of pairs to select
+    precentage = 0.3
+    num_pairs = neighbor_pairs.shape[0]
+    num_select = int(precentage * num_pairs)
 
-        # Calculate the number of pairs to select
-        precentage = 0.3
-        num_pairs = neighbor_pairs.shape[0]
-        num_select = int(precentage * num_pairs)
+    # Shuffle the indices and select the first 30%
+    shuffled_indices = torch.randperm(num_pairs)
+    selected_indices = shuffled_indices[:num_select]
 
-        # Shuffle the indices and select the first 30%
-        shuffled_indices = torch.randperm(num_pairs)
-        selected_indices = shuffled_indices[:num_select]
+    # Extract the selected pairs
+    selected_pairs_tensor = neighbor_pairs[selected_indices] #size num_select
 
-        # Extract the selected pairs
-        selected_pairs_tensor = neighbor_pairs[selected_indices] #size num_select
+    predictions = discriminator(selected_pairs_tensor).squeeze()
+    # Convert predictions to binary (0 or 1) using 0.5 as a threshold
+    binary_predictions = (predictions >= 0.5).long().cpu().numpy()
 
-        predictions = discriminator(selected_pairs_tensor).squeeze()
-        # Convert predictions to binary (0 or 1) using 0.5 as a threshold
-        binary_predictions = (predictions >= 0.5).long().cpu().numpy()
+    num_ones = np.sum(binary_predictions == 1)
+    num_zeros = np.sum(binary_predictions == 0)
 
-        num_ones = np.sum(binary_predictions == 1)
-        num_zeros = np.sum(binary_predictions == 0)
+    print(f"Number of relevant connections: {num_ones}")
+    print(f"Number of irrelevant: {num_zeros}")
+    print(f"Success Rate: {num_ones / (num_zeros + num_ones)}")
 
-        print(f"Number of relevant connections: {num_ones}")
-        print(f"Number of irrelevant: {num_zeros}")
-        print(f"Success Rate: {num_ones / (num_zeros + num_ones)}")
+    content = f"Number of relevant connections: {num_ones}\nNumber of irrelevant: {num_zeros}\nSuccess Rate: {num_ones / (num_zeros + num_ones)}\n"
+    predictions_file.write(content)
 
-        content = f"Number of relevant connections: {num_ones}\nNumber of irrelevant: {num_zeros}\nSuccess Rate: {num_ones / (num_zeros + num_ones)}\n"
-        predictions_file.write(content)
+    # Iterate over selected pairs and their predictions
+    for idx, (edge_index, prediction) in enumerate(zip(selected_indices, binary_predictions)):
+        # Get the original IDs for the selected pair
+        a_new, b_new = edge_list[edge_index]  # Assuming tensor to list conversion works here
+        a, b = reverse_id_mapping[a_new], reverse_id_mapping[b_new]
+        
+        # Initialize or update the sampled count
+        if (a, b) not in edge_sampled:
+            edge_sampled[(a, b)] = [1, 0]  # Initialize with 1 sample, 0 successes
+        else:
+            edge_sampled[(a, b)][0] +=1  # Increment sample count
+        
+        # Update success count based on prediction
+        if prediction == 1:  # Success
+            edge_sampled[(a, b)][1] +=1  # Increment success count
 
-        # Iterate over selected pairs and their predictions
-        for idx, (edge_index, prediction) in enumerate(zip(selected_indices, binary_predictions)):
-            # Get the original IDs for the selected pair
-            a_new, b_new = edge_list[edge_index]  # Assuming tensor to list conversion works here
-            a, b = reverse_id_mapping[a_new], reverse_id_mapping[b_new]
-            
-            # Initialize or update the sampled count
-            if (a, b) not in edge_sampled:
-                edge_sampled[(a, b)] = [1, 0]  # Initialize with 1 sample, 0 successes
-            else:
-                edge_sampled[(a, b)][0] +=1  # Increment sample count
-            
-            # Update success count based on prediction
-            if prediction == 1:  # Success
-                edge_sampled[(a, b)][1] +=1  # Increment success count
+def LinkPrediction(iteration, original_graph, feature_vectors, id_mapping):
+    output_file_path_run = output_file_path + f"{iteration}.txt"
+    predictions_results_file_path_run = predictions_results_file_path + f"{iteration}.txt"
+    output_file = open(output_file_path_run, 'w')
+    predictions_file = open(predictions_results_file_path_run, 'w')
+
+    #graph is of type igraph
+    GAHNRL(original_graph, feature_vectors, id_mapping, output_file, predictions_file)
+    output_file.close()
+    predictions_file.close()
+
+# Main function
+def main():
+    unique_ids = set()
+    with open(file_path, 'r') as file:
+        for line in file:
+            source, target = line.strip().split()
+            unique_ids.update([source, target])
+
+    # Create a mapping from original IDs to new continuous integer IDs
+    id_mapping = {old_id: new_id for new_id, old_id in enumerate(unique_ids)}
+
+    # Create a list of edges with the new continuous IDs
+    edges_with_new_ids = []
+    with open(file_path, 'r') as file:
+        for line in file:
+            target, source = line.strip().split()
+            new_source = id_mapping[source]
+            new_target = id_mapping[target]
+            edges_with_new_ids.append((new_source, new_target))
+
+    # Now create the graph with the correctly mapped edges
+    g = ig.Graph(edges=edges_with_new_ids, directed=True)
+    feature_vectors, original_ID_node_field = readCoraMetaData(metaDataPath, id_mapping)
+    edge_weights,edges = calculate_edge_weights(g,feature_vectors)
+
+    resize_feature_vectors(feature_vectors)
+    # and edge_weights
+    g.es['weight'] = edge_weights
+
+    for iteration in range (30):
+        LinkPrediction(iteration+1, g, feature_vectors, id_mapping)
 
     # After all runs, calculate success rates
     for edge, counts in edge_sampled.items():
@@ -886,49 +914,18 @@ def make_final_predictions(neighbor_pairs, discriminator,edge_list):
         successes = counts[1]
         success_rate = successes / sampled_count
         edge_sampled[edge] = (sampled_count, success_rate)
-        content = f"{edge} : sampled count: {sampled_count} success_rate {success_rate}\n"
-        predictions_file.write(content)
-
+  
     # Generate the final excel sheet for the results:
-    create_excel(edge_sampled)
+    create_excel(edge_sampled, original_ID_node_field)
+
+# GLOBALS #
+data = pd.read_csv(file_path, sep='\t', names=['cited_paper_id', 'citing_paper_id'])
+# Create a directed graph from the dataframe
+G = nx.from_pandas_edgelist(data, source='citing_paper_id', target='cited_paper_id', create_using=nx.DiGraph())
+# Initialize the dictionaries
+edge_sampled = {}  # Key: (source, destination), Value: (sampled_count, success_count)
+
+if __name__ == "__main__":
+  main()
 
 
-# MAIN #
-# Read the edgelist file and create a set of unique IDs
-unique_ids = set()
-with open(file_path, 'r') as file:
-    for line in file:
-        source, target = line.strip().split()
-        unique_ids.update([source, target])
-
-# Create a mapping from original IDs to new continuous integer IDs
-id_mapping = {old_id: new_id for new_id, old_id in enumerate(unique_ids)}
-
-# Create a list of edges with the new continuous IDs
-edges_with_new_ids = []
-with open(file_path, 'r') as file:
-    for line in file:
-        target, source = line.strip().split()
-        new_source = id_mapping[source]
-        new_target = id_mapping[target]
-        edges_with_new_ids.append((new_source, new_target))
-
-# Now create the graph with the correctly mapped edges
-g = ig.Graph(edges=edges_with_new_ids, directed=True)
-
-print(g.summary())
-
-feature_vectors, node_labels = readCoraMetaData(metaDataPath, id_mapping)
-edge_weights,edges = calculate_edge_weights(g,feature_vectors)
-
-resize_feature_vectors(feature_vectors)
-
-# and edge_weights
-g.es['weight'] = edge_weights
-
-file = open(output_file_path, 'w')
-
-predictions_file = open(predictions_results_file_path, 'w')
-
-#g is of type igraph
-GAHNRL(g, feature_vectors)
