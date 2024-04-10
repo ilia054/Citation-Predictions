@@ -36,6 +36,7 @@ class Generator(nn.Module):
         self.model = nn.Sequential(
             nn.Linear(latent_dim, EMBEDDING_DIMENSION), # Adjust to your architecture needs
             nn.ReLU(),
+            nn.Dropout(0.2),            
             nn.Linear(EMBEDDING_DIMENSION, EMBEDDING_DIMENSION),       # This should match the concatenated vector size
             # Add more layers if necessary
         )
@@ -49,8 +50,10 @@ class Discriminator(nn.Module):
         self.model = nn.Sequential(
             nn.Linear(EMBEDDING_DIMENSION, EMBEDDING_DIMENSION // 2),       # Input layer now takes 256-dimensional vector
             nn.LeakyReLU(),
+            nn.Dropout(0.1),           
             nn.Linear(EMBEDDING_DIMENSION // 2, EMBEDDING_DIMENSION // 4),
             nn.LeakyReLU(),
+            nn.Dropout(0.1),
             nn.Linear(EMBEDDING_DIMENSION // 4, 1),
             nn.Sigmoid()
         )
