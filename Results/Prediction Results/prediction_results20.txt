@@ -1,0 +1,4 @@
+Start final prediction phase
+Number of relevant connections: 536
+Number of irrelevant: 1092
+Success Rate: 0.32923832923832924
